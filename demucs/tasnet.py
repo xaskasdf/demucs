@@ -36,6 +36,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .utils import capture_init
+
 EPS = 1e-8
 
 
@@ -63,6 +65,7 @@ def overlap_and_add(signal, frame_step):
 
 
 class ConvTasNet(nn.Module):
+    @capture_init
     def __init__(self,
                  N=256,
                  L=20,
@@ -73,6 +76,7 @@ class ConvTasNet(nn.Module):
                  R=4,
                  C=4,
                  audio_channels=1,
+                 samplerate=44100,
                  norm_type="gLN",
                  causal=False,
                  mask_nonlinear='relu'):
@@ -96,6 +100,8 @@ class ConvTasNet(nn.Module):
         self.norm_type = norm_type
         self.causal = causal
         self.mask_nonlinear = mask_nonlinear
+        self.audio_channels = audio_channels
+        self.samplerate = samplerate
         # Components
         self.encoder = Encoder(L, N, audio_channels)
         self.separator = TemporalConvNet(N, B, H, P, X, R, C, norm_type, causal, mask_nonlinear)

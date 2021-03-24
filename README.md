@@ -28,6 +28,23 @@ Demucs and Conv-Tasnet obtain the same SDR. See [our paper][demucs_arxiv] Sectio
 width="800px"></p>
 
 
+## Important news if you are already using Demucs
+
+- 13/04/2020: **Demucs released under MIT**: We are happy to release Demucs under the MIT licence.
+    We hope that this will broaden the impact of this research to new applications.
+- 13/04/2020: **New quantized models**: New quantized 8 bit models, 4 times smaller and with
+    limited impact on quality. To use them, pass `-Q` to the `demucs.separate` command.
+- 31/01/2020: **You will need to re-download pre-trained models**. Due to an incompatiblity with Pytorch 1.4.0, the pre-trained models could not be loaded
+with it. I have replaced all the pre-trained models using a more future proof serialization. It means
+that you will get an error if you update the repo saying that the previously downloaded checkpoints
+don't have the right signature. Please delete the previously downloaded files in `models` and it will download the new ones.
+Sorry for the inconveniance.
+- 31/01/2020: **New light models**: I have added a lighter version of Demucs, trained with the option `--channels=64`.
+The overall SDR is a bit worse, but to the hear it sounds quite similar. The files are smaller to download (1GB),
+and it should run about 4x faster. I know quite a few people wanted to use Demucs on GPU, I hope this version
+can run on a wider range of hardware :) To use it simply replace `-n demucs` by `-n light` (or `-n light_extra`
+for the version trained on more data)
+in the `separate` command described hereafter.
 
 ## Comparison with other models
 
@@ -65,12 +82,70 @@ If you have anaconda installed, you can run from the root of this repository:
     conda env update -f environment-cuda.yml # if you have GPUs
     conda activate demucs
 
-This will create a `demucs` environmnent with all the dependencies installed.
+This will create a `demucs` environment with all the dependencies installed.
+
+### Running in Docker
+
+Thanks to @xserrat, there is now a Docker image definition ready for using Demucs. This can ensure all libraries are correctly installed without interfering with the host OS. See his repo [Docker Facebook Demucs](https://github.com/xserrat/docker-facebook-demucs) for more information.
 
 ### Using Windows
 
 If you are using Windows, replace `python3` by `python.exe` in all the commands provided hereafter :)
-Parts of the code are untested on Windows (in particular, training a new model). Please open an issue in case you have a problem.
+Parts of the code are untested on Windows (in particular, training a new model). If you don't have much experience with Anaconda, python or the shell, here are more detailed instructions. Note that Demucs is not supported on 32bits systems (as Pytorch is not available there).
+
+- First install Anaconda with **Python 3.7**, which you can find [here][install].
+- Start the [Anaconda prompt][prompt].
+- Type in the following commands:
+
+```bash
+cd %HOMEPATH%
+conda install git
+git clone https://github.com/facebookresearch/demucs
+cd demucs
+conda env update -f environment-cpu.yml
+conda activate demucs
+python.exe -m demucs.separate -d cpu --dl "PATH_TO_AUDIO_FILE_1" ["PATH_TO_AUDIO_FILE_2" ...]
+```
+The `"` around the filename are required if the path contains spaces.
+The separated files will be under `C:\Users\YOUR_USERNAME\demucs\separated\demucs\`. The next time you want to use Demucs, start again the [Anaconda prompt][prompt] and simply run
+```bash
+cd %HOMEPATH%
+cd demucs
+conda activate demucs
+python.exe -m demucs.separate -d cpu --dl "PATH_TO_AUDIO_FILE_1" ...
+```
+
+If you have an error saying that `mkl_intel_thread.dll` cannot be found, you can try to first run
+`conda install -c defaults intel-openmp -f`. Then try again to run the `demucs.separate` command. If it still doesn't work, you can try to run first `set CONDA_DLL_SEARCH_MODIFICATION_ENABLE=1`, then again the `demucs.separate` command and hopefully it will work 🙏.
+If you get a permission error, please try starting the Anaconda Prompt as administrator.
+
+[install]: https://www.anaconda.com/distribution/#windows
+[prompt]: https://docs.anaconda.com/anaconda/user-guide/getting-started/#open-prompt-win
+
+### Using Mac OS X
+
+If you do not already have Anaconda installed or much experience with the terminal on Mac OS X here are some detailed instructions:
+
+1. Download Anaconda 3.7 64 bits for MacOS: https://www.anaconda.com/distribution/#download-section
+2. Open Anaconda Prompt in MacOSX: https://docs.anaconda.com/anaconda/user-guide/getting-started/#open-nav-mac
+3. Follow these commands:
+```bash
+cd ~
+conda install git
+git clone https://github.com/facebookresearch/demucs
+cd demucs
+conda env update -f environment-cpu.yml
+conda activate demucs
+python3 -m demucs.separate --dl -n demucs -d cpu PATH_TO_AUDIO_FILE_1
+```
+You can drag the .mp3 file to the console and it will paste the mp3 path.
+To later reuse Demucs, simply start again the Anaconda Prompt and run
+```bash
+cd ~/demucs
+conda activate demucs
+python3 -m demucs.separate --dl -n demucs -d cpu PATH_TO_AUDIO_FILE_1
+```
+**If thats fails:**, replace `python3` by `python`.
 
 ## Separating tracks
 
@@ -78,10 +153,14 @@ In order to try Demucs or Conv-Tasnet on your tracks, simply run from the root o
 
 ```bash
 python3 -m demucs.separate --dl -n demucs PATH_TO_AUDIO_FILE_1 [PATH_TO_AUDIO_FILE_2 ...] # for Demucs
+python3 -m demucs.separate --dl -n demucs --mp3 PATH_TO_AUDIO_FILE_1 --mp3-bitrate BITRATE # output files saved as MP3
+python3 -m demucs.separate --dl -n demucs -Q PATH_TO_AUDIO_FILE_1 # Use quantized models (smaller download, slightly worse quality)
 python3 -m demucs.separate --dl -n tasnet PATH_TO_AUDIO_FILE_1 ... # for Conv-Tasnet
 # Demucs with randomized equivariant stabilization (10x slower, suitable for GPU, 0.2 extra SDR)
 python3 -m demucs.separate --dl -n demucs --shifts=10 PATH_TO_AUDIO_FILE_1
 ```
+
+If you have a GPU, but you run out of memory, please add `-d cpu` to the command line. See the section hereafter for more details on the memory requirements for GPU acceleration.
 
 The `--dl`
 flag will automatically download a pretrained model into `./models`. There will be one folder
@@ -92,13 +171,23 @@ Those folders will be placed in `./separated/MODEL_NAME`.
 Any stereo audio file supported by ffmpeg will work. It will be resampled to 44.1 kHz on the fly
 if necessary. If multiple streams (i.e. a stems file) are present in the audio file,
 the first one will be used.
+The output will be a wave file, either in int16 format or float32 (if `--float32` is passed).
+If you want to export as MP3, first install `lameenc` (on Windows `python.exe -m pip install -U lameenc`, 
+on Linux/OSX `python3 -m pip install -U lameenc`), and use the `--mp3` flag. By default it will export it at 320 kbps, but you can use the `--mp3-bitrate` flag to set a custom bitrate.
 
 Other pre-trained models can be selected with the `-n` flag and downloaded with the `--dl` flag.
 The models will be stored in the `models` folder. The list of pre-trained models is:
 - `demucs`: Demucs trained on MusDB,
 - `demucs_extra`: Demucs trained with extra training data,
+- `light`: Demucs trained on MusDB with `--channels=64` (smaller, faster, quality might be a bit worse),
+- `light_extra`: Demucs trained with extra training data with `--channels=64`,
 - `tasnet`: Conv-Tasnet trained on MusDB,
 - `tasnet_extra`: Conv-Tasnet trained with extra training data.
+
+
+For the `demucs*` and `light*` models, 8 bit quantized version are available.
+The model is 4 times smaller but quality might be a bit worse, especially for the `other`
+and `vocals` sources. Just add `-Q` to the command line to use them.
 
 
 The `--shifts=SHIFTS` performs multiple predictions with random shifts (a.k.a randomized
@@ -107,6 +196,11 @@ slower but improves the accuracy of Demucs by 0.2 points of SDR.
 It has limited impact on Conv-Tasnet as the model is by nature almost time equivariant.
 The value of 10 was used on the original paper, although 5 yields mostly the same gain.
 It is deactivated by default.
+
+
+### Memory requirements for GPU acceleration
+
+If you want to use GPU acceleration, you will need at least 8GB of RAM on your GPU for `demucs` and 4GB for `tasnet`. Sorry, the code for demucs is not super optimized for memory! If you do not have enough memory on your GPU, simply add `-d cpu` to the command line to use the CPU. With Demucs, processing time should be roughly equal to the duration of the track.
 
 
 ## Examining the results from the paper experiments
@@ -123,7 +217,7 @@ The `std` column shows the standard deviation divided by the square root of the 
 
 ## Training Demucs and evaluating on the MusDB dataset
 
-If you want to train Demucs from scrath, you will need a copy of the MusDB dataset.
+If you want to train Demucs from scratch, you will need a copy of the MusDB dataset.
 It can be obtained on the [MusDB website][musdb].
 To start training on a single GPU or CPU, use:
 ```bash
@@ -232,19 +326,17 @@ export DEMUCS_MUSDB=PATH TO MUSDB
 ## How to cite
 
 ```
-@techreport{music_separation_waveform,
-  title = {{Music Source Separation in the Waveform Domain}},
-  author = {D{\'e}fossez, Alexandre and Usunier, Nicolas and Bottou, L{\'e}on and Bach, Francis},
-  year = {2019},
-  number = {02379796v1},
-  institution = {HAL},
+@article{defossez2019music,
+  title={Music Source Separation in the Waveform Domain},
+  author={D{\'e}fossez, Alexandre and Usunier, Nicolas and Bottou, L{\'e}on and Bach, Francis},
+  journal={arXiv preprint arXiv:1911.13254},
+  year={2019}
 }
 ```
 
 ## License
 
-Demucs is released under Creative Commons Attribution-NonCommercial 4.0 International
-(CC BY-NC 4.0) license, as found in the [LICENSE](LICENSE) file.
+Demucs is released under the MIT license as found in the [LICENSE](LICENSE) file.
 
 The file `demucs/tasnet.py` is adapted from the [kaituoxu/Conv-TasNet][tasnet] repository.
 It was originally released under the MIT License updated to support multiple audio channels.

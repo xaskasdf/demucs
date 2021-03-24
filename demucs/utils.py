@@ -5,13 +5,17 @@
 # LICENSE file in the root directory of this source tree.
 
 import errno
+import functools
+import gzip
 import os
 import random
 import socket
 import tempfile
+import warnings
 from contextlib import contextmanager
 
 import torch as th
+import tqdm
 from torch import distributed
 from torch.nn import functional as F
 
@@ -88,7 +92,7 @@ def human_seconds(seconds, display='.2f'):
     return f"{format(value, display)} {last}"
 
 
-def apply_model(model, mix, shifts=None, split=False):
+def apply_model(model, mix, shifts=None, split=False, progress=False):
     """
     Apply model to a given mixture.
 
@@ -100,21 +104,25 @@ def apply_model(model, mix, shifts=None, split=False):
         split (bool): if True, the input will be broken down in 8 seconds extracts
             and predictions will be performed individually on each and concatenated.
             Useful for model with large memory footprint like Tasnet.
+        progress (bool): if True, show a progress bar (requires split=True)
     """
     channels, length = mix.size()
     device = mix.device
     if split:
         out = th.zeros(4, channels, length, device=device)
-        shift = 80_000 * 8
-        offset = 0
-        while offset < length:
+        shift = model.samplerate * 10
+        offsets = range(0, length, shift)
+        scale = 10
+        if progress:
+            offsets = tqdm.tqdm(offsets, unit_scale=scale, ncols=120, unit='seconds')
+        for offset in offsets:
             chunk = mix[..., offset:offset + shift]
             chunk_out = apply_model(model, chunk, shifts=shifts)
             out[..., offset:offset + shift] = chunk_out
             offset += shift
         return out
     elif shifts:
-        max_shift = 22050
+        max_shift = int(model.samplerate / 2)
         mix = F.pad(mix, (max_shift, max_shift))
         offsets = list(range(max_shift))
         random.shuffle(offsets)
@@ -145,3 +153,34 @@ def temp_filenames(count, delete=True, **kwargs):
         if delete:
             for name in names:
                 os.unlink(name)
+
+
+def load_model(path):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        load_from = path
+        if str(path).endswith(".gz"):
+            load_from = gzip.open(path, "rb")
+        klass, args, kwargs, state = th.load(load_from, 'cpu')
+    model = klass(*args, **kwargs)
+    model.load_state_dict(state)
+    return model
+
+
+def save_model(model, path):
+    args, kwargs = model._init_args_kwargs
+    klass = model.__class__
+    state = {k: p.data.to('cpu') for k, p in model.state_dict().items()}
+    save_to = path
+    if str(path).endswith(".gz"):
+        save_to = gzip.open(path, "wb", compresslevel=5)
+    th.save((klass, args, kwargs, state), save_to)
+
+
+def capture_init(init):
+    @functools.wraps(init)
+    def __init__(self, *args, **kwargs):
+        self._init_args_kwargs = (args, kwargs)
+        init(self, *args, **kwargs)
+
+    return __init__

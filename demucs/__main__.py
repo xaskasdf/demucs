@@ -23,7 +23,7 @@ from .raw import Rawset
 from .tasnet import ConvTasNet
 from .test import evaluate
 from .train import train_model, validate_model
-from .utils import human_seconds, sizeof_fmt
+from .utils import human_seconds, load_model, save_model, sizeof_fmt
 
 
 @dataclass
@@ -82,8 +82,12 @@ def main():
     if args.restart and checkpoint.exists():
         checkpoint.unlink()
 
-    if args.tasnet:
-        model = ConvTasNet(audio_channels=args.audio_channels, X=args.X).to(device)
+    if args.test:
+        args.epochs = 1
+        args.repeat = 0
+        model = load_model(args.models / args.test)
+    elif args.tasnet:
+        model = ConvTasNet(audio_channels=args.audio_channels, samplerate=args.samplerate, X=args.X)
     else:
         model = Demucs(
             audio_channels=args.audio_channels,
@@ -99,7 +103,9 @@ def main():
             sources=4,
             stride=args.conv_stride,
             upsample=args.upsample,
-        ).to(device)
+            samplerate=args.samplerate
+        )
+    model.to(device)
     if args.show:
         print(model)
         size = sizeof_fmt(4 * sum(p.numel() for p in model.parameters()))
@@ -117,8 +123,10 @@ def main():
         optimizer.load_state_dict(saved.optimizer)
 
     if args.save_model:
-        model.to("cpu")
-        th.save(model, args.models / f"{name}.th")
+        if args.rank == 0:
+            model.to("cpu")
+            model.load_state_dict(saved.best_state)
+            save_model(model, args.models / f"{name}.th")
         return
 
     if args.rank == 0:
@@ -229,7 +237,7 @@ def main():
 
         saved.last_state = model.state_dict()
         saved.optimizer = optimizer.state_dict()
-        if args.rank == 0:
+        if args.rank == 0 and not args.test:
             th.save(saved, checkpoint_tmp)
             checkpoint_tmp.rename(checkpoint)
 
@@ -254,7 +262,7 @@ def main():
              shifts=args.shifts,
              workers=args.eval_workers)
     model.to("cpu")
-    th.save(model, args.models / f"{name}.th")
+    save_model(model, args.models / f"{name}.th")
     if args.rank == 0:
         print("done")
         done.write_text("done")

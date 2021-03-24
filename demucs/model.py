@@ -9,7 +9,7 @@ import math
 import torch as th
 from torch import nn
 
-from .utils import center_trim
+from .utils import capture_init, center_trim
 
 
 class BLSTM(nn.Module):
@@ -59,6 +59,7 @@ def downsample(x, stride):
 
 
 class Demucs(nn.Module):
+    @capture_init
     def __init__(self,
                  sources=4,
                  audio_channels=2,
@@ -72,7 +73,8 @@ class Demucs(nn.Module):
                  stride=4,
                  growth=2.,
                  lstm_layers=2,
-                 context=3):
+                 context=3,
+                 samplerate=44100):
         """
         Args:
             sources (int): number of sources to separate
@@ -107,6 +109,7 @@ class Demucs(nn.Module):
         self.depth = depth
         self.upsample = upsample
         self.channels = channels
+        self.samplerate = samplerate
 
         self.encoder = nn.ModuleList()
         self.decoder = nn.ModuleList()
@@ -180,6 +183,7 @@ class Demucs(nn.Module):
                 length = math.ceil(length / self.stride) + self.kernel_size - 1
             else:
                 length = math.ceil((length - self.kernel_size) / self.stride) + 1
+            length = max(1, length)
             length += self.context - 1
         for _ in range(self.depth):
             if self.upsample:
