@@ -1,4 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta, Inc. and its affiliates.
 # All rights reserved.
 #
 # This source code is licensed under the license found in the
@@ -7,8 +7,11 @@ import json
 import subprocess as sp
 from pathlib import Path
 
+import lameenc
+import julius
 import numpy as np
 import torch
+import torchaudio as ta
 
 from .utils import temp_filenames
 
@@ -129,26 +132,8 @@ class AudioFile:
                 wav = np.fromfile(filename, dtype=np.float32)
                 wav = torch.from_numpy(wav)
                 wav = wav.view(-1, self.channels()).t()
-                if channels == 1:
-                    # Case 1:
-                    # The caller asked 1-channel audio, but the stream have multiple
-                    # channels, downmix all channels.
-                    # We do mono convertion here as ffmpeg mess up the volume of mono output
-                    # otherwise. See https://sound.stackexchange.com/a/42710.
-                    wav = wav.mean(dim=0, keepdim=True)
-                elif self.channels() == 1 and channels != 1:
-                    # Case 2:
-                    # The caller asked for multiple channels, but the input file have
-                    # one single channel, replicate the audio over all channels.
-                    wav = wav.as_strided(size=(channels, wav.shape[1]), stride=(0, 1))
-                elif self.channels() >= channels:
-                    # Case 3:
-                    # The caller asked for multiple channels, and the input file have
-                    # more channels than requested. In that case return the first channels.
-                    wav = wav[:channels, :]
-                else:
-                    # Case 4: What is a reasonable choice here?
-                    raise ValueError('The input file has less channels than requested')
+                if channels is not None:
+                    wav = convert_audio_channels(wav, channels)
                 if target_size is not None:
                     wav = wav[..., :target_size]
                 wavs.append(wav)
@@ -156,3 +141,117 @@ class AudioFile:
         if single:
             wav = wav[0]
         return wav
+
+
+def convert_audio_channels(wav, channels=2):
+    """Convert audio to the given number of channels."""
+    *shape, src_channels, length = wav.shape
+    if src_channels == channels:
+        pass
+    elif channels == 1:
+        # Case 1:
+        # The caller asked 1-channel audio, but the stream have multiple
+        # channels, downmix all channels.
+        wav = wav.mean(dim=-2, keepdim=True)
+    elif src_channels == 1:
+        # Case 2:
+        # The caller asked for multiple channels, but the input file have
+        # one single channel, replicate the audio over all channels.
+        wav = wav.expand(*shape, channels, length)
+    elif src_channels >= channels:
+        # Case 3:
+        # The caller asked for multiple channels, and the input file have
+        # more channels than requested. In that case return the first channels.
+        wav = wav[..., :channels, :]
+    else:
+        # Case 4: What is a reasonable choice here?
+        raise ValueError('The audio file has less channels than requested but is not mono.')
+    return wav
+
+
+def convert_audio(wav, from_samplerate, to_samplerate, channels):
+    """Convert audio from a given samplerate to a target one and target number of channels."""
+    wav = convert_audio_channels(wav, channels)
+    return julius.resample_frac(wav, from_samplerate, to_samplerate)
+
+
+def i16_pcm(wav):
+    """Convert audio to 16 bits integer PCM format."""
+    if wav.dtype.is_floating_point:
+        return (wav.clamp_(-1, 1) * (2**15 - 1)).short()
+    else:
+        return wav
+
+
+def f32_pcm(wav):
+    """Convert audio to float 32 bits PCM format."""
+    if wav.dtype.is_floating_point:
+        return wav
+    else:
+        return wav.float() / (2**15 - 1)
+
+
+def as_dtype_pcm(wav, dtype):
+    """Convert audio to either f32 pcm or i16 pcm depending on the given dtype."""
+    if wav.dtype.is_floating_point:
+        return f32_pcm(wav)
+    else:
+        return i16_pcm(wav)
+
+
+def encode_mp3(wav, path, samplerate=44100, bitrate=320, verbose=False):
+    """Save given audio as mp3. This should work on all OSes."""
+    C, T = wav.shape
+    wav = i16_pcm(wav)
+    encoder = lameenc.Encoder()
+    encoder.set_bit_rate(bitrate)
+    encoder.set_in_sample_rate(samplerate)
+    encoder.set_channels(C)
+    encoder.set_quality(2)  # 2-highest, 7-fastest
+    if not verbose:
+        encoder.silence()
+    wav = wav.data.cpu()
+    wav = wav.transpose(0, 1).numpy()
+    mp3_data = encoder.encode(wav.tobytes())
+    mp3_data += encoder.flush()
+    with open(path, "wb") as f:
+        f.write(mp3_data)
+
+
+def prevent_clip(wav, mode='rescale'):
+    """
+    different strategies for avoiding raw clipping.
+    """
+    assert wav.dtype.is_floating_point, "too late for clipping"
+    if mode == 'rescale':
+        wav = wav / max(1.01 * wav.abs().max(), 1)
+    elif mode == 'clamp':
+        wav = wav.clamp(-0.99, 0.99)
+    elif mode == 'tanh':
+        wav = torch.tanh(wav)
+    else:
+        raise ValueError(f"Invalid mode {mode}")
+    return wav
+
+
+def save_audio(wav, path, samplerate, bitrate=320, clip='rescale',
+               bits_per_sample=16, as_float=False):
+    """Save audio file, automatically preventing clipping if necessary
+    based on the given `clip` strategy. If the path ends in `.mp3`, this
+    will save as mp3 with the given `bitrate`.
+    """
+    wav = prevent_clip(wav, mode=clip)
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix == ".mp3":
+        encode_mp3(wav, path, samplerate, bitrate, verbose=True)
+    elif suffix == ".wav":
+        if as_float:
+            bits_per_sample = 32
+            encoding = 'PCM_F'
+        else:
+            encoding = 'PCM_S'
+        ta.save(str(path), wav, sample_rate=samplerate,
+                encoding=encoding, bits_per_sample=bits_per_sample)
+    else:
+        raise ValueError(f"Invalid suffix for path: {suffix}")

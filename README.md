@@ -1,336 +1,266 @@
-# Music Source Separation in the Waveform Domain
+# Demucs Music Source Separation
 
-We provide an implementation of Demucs and Conv-Tasnet for music source separation on the [MusDB][musdb] dataset.
-They can separate drums, bass and vocals from the rest with state-of-the-art results, surpassing previous waveform or spectrogram based methods.
-The architecture and results obtained are detailed in our paper
-[Music Source Separation in the waveform domain][demucs_arxiv].
-
-Demucs is based on U-Net convolutional architecture inspired by [Wave-U-Net][waveunet] and
-[SING][sing], with GLUs, a BiLSTM between the encoder and decoder, specific initialization of weights
-and transposed convolutions in the decoder.
-
-[Conv-Tasnet](https://arxiv.org/abs/1809.07454)
-is a separation model developed for speech which predicts a mask on a learnt over-complete linear representation
-using a purely convolutional model with stride of 1 and dilated convolutional blocks.
-We reused the code from the [kaituoxu/Conv-TasNet][tasnet]
-repository and added support for multiple audio channels.
+[![Support Ukraine](https://img.shields.io/badge/Support-Ukraine-FFD500?style=flat&labelColor=005BBB)](https://opensource.fb.com/support-ukraine)
+![tests badge](https://github.com/facebookresearch/demucs/workflows/tests/badge.svg)
+![linter badge](https://github.com/facebookresearch/demucs/workflows/linter/badge.svg)
 
 
-When trained only on MusDB, Conv-Tasnet achieves higher SDR than Demucs (5.7 vs 5.6).
-However, the audio it generates has significant artifacts as measured by human evaluations
-(MOS is 3.2 for Demucs, 2.9 for Conv-Tasnet). When trained with extra training data,
-Demucs and Conv-Tasnet obtain the same SDR. See [our paper][demucs_arxiv] Section 6 for more details or listen to our
-[audio samples][audio] .
+This is the 4th release of Demucs (v4), featuring Hybrid Transformer based source separation.
+**For the classic Hybrid Demucs (v3):** [Go this commit][demucs_v3].
+If you are experiencing issues and want the old Demucs back, please fill an issue, and then you can get back to the v3 with
+`git checkout v3`. You can also go [Demucs v2][demucs_v2].
+
+
+Demucs is a state-of-the-art music source separation model, currently capable of separating
+drums, bass, and vocals from the rest of the accompaniment.
+Demucs is based on a U-Net convolutional architecture inspired by [Wave-U-Net][waveunet].
+The v4 version features [Hybrid Transformer Demucs][htdemucs], a hybrid spectrogram/waveform separation model using Transformers.
+It is based on [Hybrid Demucs][hybrid_paper] (also provided in this repo) with the innermost layers are
+replaced by a cross-domain Transformer Encoder. This Transformer uses self-attention within each domain,
+and cross-attention across domains.
+The model achieves a SDR of 9.00 dB on the MUSDB HQ test set. Moreover, when using sparse attention
+kernels to extend its receptive field and per source fine-tuning, we achieve state-of-the-art 9.20 dB of SDR.
+
+Samples are available [on our sample page](https://ai.honu.io/papers/htdemucs/index.html).
+Checkout [our paper][htdemucs] for more information.
+It has been trained on the [MUSDB HQ][musdb] dataset + an extra training dataset of 800 songs.
+This model separates drums, bass and vocals and other stems for any song.
+
+
+As Hybrid Transformer Demucs is brand new, it is not activated by default, you can activate it in the usual
+commands described hereafter with `-n htdemucs_ft`.
+The single, non fine-tuned model is provided as `-n htdemucs`, and the retrained baseline
+as `-n hdemucs_mmi`. The Sparse Hybrid Transformer model decribed in our paper is not provided as its
+requires custom CUDA code that is not ready for release yet.
+We are also releasing an experimental 6 sources model, that adds a `guitar` and `piano` source.
+Quick testing seems to show okay quality for `guitar`, but a lot of bleeding and artifacts for the `piano` source.
+
 
 <p align="center">
-<img src="./demucs.png" alt="Schema representing the structure of Demucs,
-    with a convolutional encoder, a BiLSTM, and a decoder based on transposed convolutions."
+<img src="./demucs.png" alt="Schema representing the structure of Hybrid Transformer Demucs,
+    with a dual U-Net structure, one branch for the temporal domain,
+    and one branch for the spectral domain. There is a cross-domain Transformer between the Encoders and Decoders."
 width="800px"></p>
+
 
 
 ## Important news if you are already using Demucs
 
-- 13/04/2020: **Demucs released under MIT**: We are happy to release Demucs under the MIT licence.
-    We hope that this will broaden the impact of this research to new applications.
-- 13/04/2020: **New quantized models**: New quantized 8 bit models, 4 times smaller and with
-    limited impact on quality. To use them, pass `-Q` to the `demucs.separate` command.
-- 31/01/2020: **You will need to re-download pre-trained models**. Due to an incompatiblity with Pytorch 1.4.0, the pre-trained models could not be loaded
-with it. I have replaced all the pre-trained models using a more future proof serialization. It means
-that you will get an error if you update the repo saying that the previously downloaded checkpoints
-don't have the right signature. Please delete the previously downloaded files in `models` and it will download the new ones.
-Sorry for the inconveniance.
-- 31/01/2020: **New light models**: I have added a lighter version of Demucs, trained with the option `--channels=64`.
-The overall SDR is a bit worse, but to the hear it sounds quite similar. The files are smaller to download (1GB),
-and it should run about 4x faster. I know quite a few people wanted to use Demucs on GPU, I hope this version
-can run on a wider range of hardware :) To use it simply replace `-n demucs` by `-n light` (or `-n light_extra`
-for the version trained on more data)
-in the `separate` command described hereafter.
+See the [release notes](./docs/release.md) for more details.
+
+- 07/12/2022: Demucs v4 now on PyPI. **htdemucs** model now used by default. Also releasing
+    a 6 sources models (adding `guitar` and `piano`, although the latter doesn't work so well at the moment).
+- 16/11/2022: Added the new **Hybrid Transformer Demucs v4** models.
+	Adding support for the [torchaudio implementation of HDemucs](https://pytorch.org/audio/stable/tutorials/hybrid_demucs_tutorial.html).
+- 30/08/2022: added reproducibility and ablation grids, along with an updated version of the paper.
+- 17/08/2022: Releasing v3.0.5: Set split segment length to reduce memory. Compatible with pyTorch 1.12.
+- 24/02/2022: Releasing v3.0.4: split into two stems (i.e. karaoke mode).
+    Export as float32 or int24.
+- 17/12/2021: Releasing v3.0.3: bug fixes  (thanks @keunwoochoi), memory drastically
+    reduced on GPU (thanks @famzah) and new multi-core evaluation on CPU (`-j` flag).
+- 12/11/2021: Releasing **Demucs v3** with hybrid domain separation. Strong improvements
+	on all sources. This is the model that won Sony MDX challenge.
+- 11/05/2021: Adding support for MusDB-HQ and arbitrary wav set, for the MDX challenge. For more information
+on joining the challenge with Demucs see [the Demucs MDX instructions](docs/mdx.md)
+
 
 ## Comparison with other models
 
-An audio comparison of Demucs and Conv-Tasnet with other state-of-the-art methods such as [Wave-U-Net][waveunet], [OpenUnmix][openunmix] or
-[MMDenseLSTM][mmdenselstm] is available on [the audio comparison page][audio].
 We provide hereafter a summary of the different metrics presented in the paper.
-You can also compare [Spleeter][spleeter], Open-Unmix, Demucs and Conv-Tasnet on one of my favorite
-songs on our [soundcloud playlist][soundcloud].
+You can also compare Hybrid Demucs (v3), [KUIELAB-MDX-Net][kuielab], [Spleeter][spleeter], Open-Unmix, Demucs (v1), and Conv-Tasnet on one of my favorite
+songs on my [soundcloud playlist][soundcloud].
 
 ### Comparison of accuracy
 
 `Overall SDR` is the mean of the SDR for each of the 4 sources, `MOS Quality` is a rating from 1 to 5
 of the naturalness and absence of artifacts given by human listeners (5 = no artifacts), `MOS Contamination`
-is a rating from 1 to 5 with 5 being zero contamination by other sources. We refer the reader to our [paper][demucs_arxiv], Section 5 and 6,
+is a rating from 1 to 5 with 5 being zero contamination by other sources. We refer the reader to our [paper][hybrid_paper],
 for more details.
 
-| Model         | Domain     | Extra data?  | Overall SDR | MOS Quality | MOS Contamination |
-| ------------- |-------------| -----:|------:|----:|----:|
-| [Open-Unmix][openunmix]      | spectrogram | no | 5.3 | 3.0 | 3.3 |
-| [Wave-U-Net][waveunet]      | waveform | no | 3.2 | - | - |
-| Demucs (this)      | waveform | no | 5.6 | **3.2** | 3.3 |
-| Conv-Tasnet (this)     | waveform | no | **5.7** | 2.9 | **3.4** |
-| Demucs  (this)    | waveform | 150 songs | **6.3** | - | - |
-| Conv-Tasnet  (this)    | waveform | 150 songs | **6.3** | - | - |
-| [MMDenseLSTM][mmdenselstm]      | spectrogram | 804 songs | 6.0 | - | - |
-| [Spleeter][spleeter]  | spectrogram | undisclosed | 5.9 | - | - |
+| Model                        | Domain      | Extra data? | Overall SDR | MOS Quality | MOS Contamination |
+|------------------------------|-------------|-------------|-------------|-------------|-------------------|
+| [Wave-U-Net][waveunet]       | waveform    | no          | 3.2         | -           | -                 |
+| [Open-Unmix][openunmix]      | spectrogram | no          | 5.3         | -           | -                 |
+| [D3Net][d3net]               | spectrogram | no          | 6.0         | -           | -                 |
+| [Conv-Tasnet][demucs_v2]     | waveform    | no          | 5.7         | -           |                   |
+| [Demucs (v2)][demucs_v2]     | waveform    | no          | 6.3         | 2.37        | 2.36              |
+| [ResUNetDecouple+][decouple] | spectrogram | no          | 6.7         | -           | -                 |
+| [KUIELAB-MDX-Net][kuielab]   | hybrid      | no          | 7.5         | **2.86**    | 2.55              |
+| [Band-Spit RNN][bandsplit]   | spectrogram | no          | **8.2**     | -           | -                 |
+| **Hybrid Demucs (v3)**       | hybrid      | no          | 7.7         | **2.83**    | **3.04**          |
+| [MMDenseLSTM][mmdenselstm]   | spectrogram | 804 songs   | 6.0         | -           | -                 |
+| [D3Net][d3net]               | spectrogram | 1.5k songs  | 6.7         | -           | -                 |
+| [Spleeter][spleeter]         | spectrogram | 25k songs   | 5.9         | -           | -                 |
+| [Band-Spit RNN][bandsplit]   | spectrogram | 1.7k (mixes only)     | **9.0**     | -           | -                 |
+| **HT Demucs f.t. (v4)**      | hybrid      | 800 songs   | **9.0**     | -           | -                 |
 
 
 
 ## Requirements
 
+You will need at least Python 3.7. See `requirements_minimal.txt` for requirements for separation only,
+and `environment-[cpu|cuda].yml` (or `requirements.txt`) if you want to train a new model.
+
+### For Windows users
+
+Everytime you see `python3`, replace it with `python.exe`. You should always run commands from the
+Anaconda console.
+
+### For musicians
+
+If you just want to use Demucs to separate tracks, you can install it with
+
+```bash
+python3 -m pip install -U demucs
+```
+
+For bleeding edge versions, you can install directly from this repo using
+```bash
+python3 -m pip install -U git+https://github.com/facebookresearch/demucs#egg=demucs
+```
+
+Advanced OS support are provided on the following page, **you must read the page for your OS before posting an issues**:
+- **If you are using Windows:** [Windows support](docs/windows.md).
+- **If you are using MAC OS X:** [Mac OS X support](docs/mac.md).
+- **If you are using Linux:** [Linux support](docs/linux.md).
+
+### For machine learning scientists
+
 If you have anaconda installed, you can run from the root of this repository:
 
-    conda env update -f environment-cpu.yml # if you don't have GPUs
-    conda env update -f environment-cuda.yml # if you have GPUs
-    conda activate demucs
+```bash
+conda env update -f environment-cpu.yml  # if you don't have GPUs
+conda env update -f environment-cuda.yml # if you have GPUs
+conda activate demucs
+pip install -e .
+```
 
 This will create a `demucs` environment with all the dependencies installed.
+
+You will also need to install [soundstretch/soundtouch](https://www.surina.net/soundtouch/soundstretch.html): on Mac OSX you can do `brew install sound-touch`,
+and on Ubuntu `sudo apt-get install soundstretch`. This is used for the
+pitch/tempo augmentation.
+
 
 ### Running in Docker
 
 Thanks to @xserrat, there is now a Docker image definition ready for using Demucs. This can ensure all libraries are correctly installed without interfering with the host OS. See his repo [Docker Facebook Demucs](https://github.com/xserrat/docker-facebook-demucs) for more information.
 
-### Using Windows
 
-If you are using Windows, replace `python3` by `python.exe` in all the commands provided hereafter :)
-Parts of the code are untested on Windows (in particular, training a new model). If you don't have much experience with Anaconda, python or the shell, here are more detailed instructions. Note that Demucs is not supported on 32bits systems (as Pytorch is not available there).
+### Running from Colab
 
-- First install Anaconda with **Python 3.7**, which you can find [here][install].
-- Start the [Anaconda prompt][prompt].
-- Type in the following commands:
+I made a Colab to easily separate track with Demucs. Note that
+transfer speeds with Colab are a bit slow for large media files,
+but it will allow you to use Demucs without installing anything.
 
-```bash
-cd %HOMEPATH%
-conda install git
-git clone https://github.com/facebookresearch/demucs
-cd demucs
-conda env update -f environment-cpu.yml
-conda activate demucs
-python.exe -m demucs.separate -d cpu --dl "PATH_TO_AUDIO_FILE_1" ["PATH_TO_AUDIO_FILE_2" ...]
-```
-The `"` around the filename are required if the path contains spaces.
-The separated files will be under `C:\Users\YOUR_USERNAME\demucs\separated\demucs\`. The next time you want to use Demucs, start again the [Anaconda prompt][prompt] and simply run
-```bash
-cd %HOMEPATH%
-cd demucs
-conda activate demucs
-python.exe -m demucs.separate -d cpu --dl "PATH_TO_AUDIO_FILE_1" ...
-```
+[Demucs on Google Colab](https://colab.research.google.com/drive/1dC9nVxk3V_VPjUADsnFu8EiT-xnU1tGH?usp=sharing)
 
-If you have an error saying that `mkl_intel_thread.dll` cannot be found, you can try to first run
-`conda install -c defaults intel-openmp -f`. Then try again to run the `demucs.separate` command. If it still doesn't work, you can try to run first `set CONDA_DLL_SEARCH_MODIFICATION_ENABLE=1`, then again the `demucs.separate` command and hopefully it will work 🙏.
-If you get a permission error, please try starting the Anaconda Prompt as administrator.
+### Web Demo
 
-[install]: https://www.anaconda.com/distribution/#windows
-[prompt]: https://docs.anaconda.com/anaconda/user-guide/getting-started/#open-prompt-win
+Integrated to [Huggingface Spaces](https://huggingface.co/spaces) with [Gradio](https://github.com/gradio-app/gradio). See demo: [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/akhaliq/demucs)
 
-### Using Mac OS X
+### Graphical Interface
 
-If you do not already have Anaconda installed or much experience with the terminal on Mac OS X here are some detailed instructions:
+@CarlGao4 has released a GUI for Demucs: [CarlGao4/Demucs-Gui](https://github.com/CarlGao4/Demucs-Gui). Downloads for Windows and macOS is available [here](https://github.com/CarlGao4/Demucs-Gui/releases). Use [FossHub mirror](https://fosshub.com/Demucs-GUI.html) to speed up your download.
 
-1. Download Anaconda 3.7 64 bits for MacOS: https://www.anaconda.com/distribution/#download-section
-2. Open Anaconda Prompt in MacOSX: https://docs.anaconda.com/anaconda/user-guide/getting-started/#open-nav-mac
-3. Follow these commands:
-```bash
-cd ~
-conda install git
-git clone https://github.com/facebookresearch/demucs
-cd demucs
-conda env update -f environment-cpu.yml
-conda activate demucs
-python3 -m demucs.separate --dl -n demucs -d cpu PATH_TO_AUDIO_FILE_1
-```
-You can drag the .mp3 file to the console and it will paste the mp3 path.
-To later reuse Demucs, simply start again the Anaconda Prompt and run
-```bash
-cd ~/demucs
-conda activate demucs
-python3 -m demucs.separate --dl -n demucs -d cpu PATH_TO_AUDIO_FILE_1
-```
-**If thats fails:**, replace `python3` by `python`.
+@Anjok07 is providing a self contained GUI in [UVR (Ultimate Vocal Remover)](https://github.com/facebookresearch/demucs/issues/334) that supports Demucs.
+
+### Other providers
+
+Audiostrip is providing free online separation with Demucs on their website [https://audiostrip.co.uk/](https://audiostrip.co.uk/).
+[MVSep](https://mvsep.com/) also provides free online separation, select `Demucs3 model B` for the best quality.
+
+Spleeter.io provides free online separation with Demucs on their website [https://www.spleeter.io/demucs](https://www.spleeter.io/demucs).
+
 
 ## Separating tracks
 
-In order to try Demucs or Conv-Tasnet on your tracks, simply run from the root of this repository
+In order to try Demucs, you can just run from any folder (as long as you properly installed it)
 
 ```bash
-python3 -m demucs.separate --dl -n demucs PATH_TO_AUDIO_FILE_1 [PATH_TO_AUDIO_FILE_2 ...] # for Demucs
-python3 -m demucs.separate --dl -n demucs --mp3 PATH_TO_AUDIO_FILE_1 --mp3-bitrate BITRATE # output files saved as MP3
-python3 -m demucs.separate --dl -n demucs -Q PATH_TO_AUDIO_FILE_1 # Use quantized models (smaller download, slightly worse quality)
-python3 -m demucs.separate --dl -n tasnet PATH_TO_AUDIO_FILE_1 ... # for Conv-Tasnet
-# Demucs with randomized equivariant stabilization (10x slower, suitable for GPU, 0.2 extra SDR)
-python3 -m demucs.separate --dl -n demucs --shifts=10 PATH_TO_AUDIO_FILE_1
+demucs PATH_TO_AUDIO_FILE_1 [PATH_TO_AUDIO_FILE_2 ...]   # for Demucs
+# If you used `pip install --user` you might need to replace demucs with python3 -m demucs
+python3 -m demucs --mp3 --mp3-bitrate BITRATE PATH_TO_AUDIO_FILE_1  # output files saved as MP3
+# If your filename contain spaces don't forget to quote it !!!
+demucs "my music/my favorite track.mp3"
+# You can select different models with `-n` mdx_q is the quantized model, smaller but maybe a bit less accurate.
+demucs -n mdx_q myfile.mp3
+# If you only want to separate vocals out of an audio, use `--two-stems=vocal` (You can also set to drums or bass)
+demucs --two-stems=vocals myfile.mp3
 ```
 
-If you have a GPU, but you run out of memory, please add `-d cpu` to the command line. See the section hereafter for more details on the memory requirements for GPU acceleration.
 
-The `--dl`
-flag will automatically download a pretrained model into `./models`. There will be one folder
-per audio file, reusing the name of the track without the extension. Each folder will contain four stereo wav files sampled at 44.1 kHz: `drums.wav`, `bass.wav`,
-`other.wav`, `vocals.wav`.
-Those folders will be placed in `./separated/MODEL_NAME`.
+If you have a GPU, but you run out of memory, please use `--segment SEGMENT` to reduce length of each split. `SEGMENT` should be changed to a integer. Personally recommend not less than 10 (the bigger the number is, the more memory is required, but quality may increase). Create an environment variable `PYTORCH_NO_CUDA_MEMORY_CACHING=1` is also helpful. If this still cannot help, please add `-d cpu` to the command line. See the section hereafter for more details on the memory requirements for GPU acceleration.
 
-Any stereo audio file supported by ffmpeg will work. It will be resampled to 44.1 kHz on the fly
-if necessary. If multiple streams (i.e. a stems file) are present in the audio file,
-the first one will be used.
-The output will be a wave file, either in int16 format or float32 (if `--float32` is passed).
-If you want to export as MP3, first install `lameenc` (on Windows `python.exe -m pip install -U lameenc`, 
-on Linux/OSX `python3 -m pip install -U lameenc`), and use the `--mp3` flag. By default it will export it at 320 kbps, but you can use the `--mp3-bitrate` flag to set a custom bitrate.
+Separated tracks are stored in the `separated/MODEL_NAME/TRACK_NAME` folder. There you will find four stereo wav files sampled at 44.1 kHz: `drums.wav`, `bass.wav`,
+`other.wav`, `vocals.wav` (or `.mp3` if you used the `--mp3` option).
 
-Other pre-trained models can be selected with the `-n` flag and downloaded with the `--dl` flag.
-The models will be stored in the `models` folder. The list of pre-trained models is:
-- `demucs`: Demucs trained on MusDB,
-- `demucs_extra`: Demucs trained with extra training data,
-- `light`: Demucs trained on MusDB with `--channels=64` (smaller, faster, quality might be a bit worse),
-- `light_extra`: Demucs trained with extra training data with `--channels=64`,
-- `tasnet`: Conv-Tasnet trained on MusDB,
-- `tasnet_extra`: Conv-Tasnet trained with extra training data.
+All audio formats supported by `torchaudio` can be processed (i.e. wav, mp3, flac, ogg/vorbis on Linux/Mac OS X etc.). On Windows, `torchaudio` has limited support, so we rely on `ffmpeg`, which should support pretty much anything.
+Audio is resampled on the fly if necessary.
+The output will be a wave file encoded as int16.
+You can save as float32 wav files with `--float32`, or 24 bits integer wav with `--int24`.
+You can pass `--mp3` to save as mp3 instead, and set the bitrate with `--mp3-bitrate` (default is 320kbps).
+
+It can happen that the output would need clipping, in particular due to some separation artifacts.
+Demucs will automatically rescale each output stem so as to avoid clipping. This can however break
+the relative volume between stems. If instead you prefer hard clipping, pass `--clip-mode clamp`.
+You can also try to reduce the volume of the input mixture before feeding it to Demucs.
 
 
-For the `demucs*` and `light*` models, 8 bit quantized version are available.
-The model is 4 times smaller but quality might be a bit worse, especially for the `other`
-and `vocals` sources. Just add `-Q` to the command line to use them.
+Other pre-trained models can be selected with the `-n` flag.
+The list of pre-trained models is:
+- `htdemucs`: first version of Hybrid Transformer Demucs. Trained on MusDB + 800 songs. Default model.
+- `htdemucs_ft`: fine-tuned version of `htdemucs`, separation will take 4 times more time
+    but might be a bit better. Same training set as `htdemucs`.
+- `htdemucs_6s`: 6 sources version of `htdemucs`, with `piano` and `guitar` being added as sources.
+    Note that the `piano` source is not working great at the moment.
+- `hdemucs_mmi`: Hybrid Demucs v3, retrained on MusDB + 800 songs.
+- `mdx`: trained only on MusDB HQ, winning model on track A at the [MDX][mdx] challenge.
+- `mdx_extra`: trained with extra training data (including MusDB test set), ranked 2nd on the track B
+    of the [MDX][mdx] challenge.
+- `mdx_q`, `mdx_extra_q`: quantized version of the previous models. Smaller download and storage
+    but quality can be slightly worse.
+- `SIG`: where `SIG` is a single model from the [model zoo](docs/training.md#model-zoo).
+
+The `--two-stems=vocals` option allows to separate vocals from the rest (e.g. karaoke mode).
+`vocals` can be changed into any source in the selected model.
+This will mix the files after separating the mix fully, so this won't be faster or use less memory.
+
+The `--shifts=SHIFTS` performs multiple predictions with random shifts (a.k.a the *shift trick*) of the input and average them. This makes prediction `SHIFTS` times
+slower. Don't use it unless you have a GPU.
+
+The `--overlap` option controls the amount of overlap between prediction windows. Default is 0.25 (i.e. 25%) which is probably fine.
+It can probably be reduced to 0.1 to improve a bit speed.
 
 
-The `--shifts=SHIFTS` performs multiple predictions with random shifts (a.k.a randomized
-equivariant stabilization) of the input and average them. This makes prediction `SHIFTS` times
-slower but improves the accuracy of Demucs by 0.2 points of SDR.
-It has limited impact on Conv-Tasnet as the model is by nature almost time equivariant.
-The value of 10 was used on the original paper, although 5 yields mostly the same gain.
-It is deactivated by default.
-
+The `-j` flag allow to specify a number of parallel jobs (e.g. `demucs -j 2 myfile.mp3`).
+This will multiply by the same amount the RAM used so be careful!
 
 ### Memory requirements for GPU acceleration
 
-If you want to use GPU acceleration, you will need at least 8GB of RAM on your GPU for `demucs` and 4GB for `tasnet`. Sorry, the code for demucs is not super optimized for memory! If you do not have enough memory on your GPU, simply add `-d cpu` to the command line to use the CPU. With Demucs, processing time should be roughly equal to the duration of the track.
+If you want to use GPU acceleration, you will need at least 3GB of RAM on your GPU for `demucs`. However, about 7GB of RAM will be required if you use the default arguments. Add `--segment SEGMENT` to change size of each split. If you only have 3GB memory, set SEGMENT to 8 (though quality may be worse if this argument is too small). Creating an environment variable `PYTORCH_NO_CUDA_MEMORY_CACHING=1` can help users with even smaller RAM such as 2GB (I separated a track that is 4 minutes but only 1.5GB is used), but this would make the separation slower.
+
+If you do not have enough memory on your GPU, simply add `-d cpu` to the command line to use the CPU. With Demucs, processing time should be roughly equal to 1.5 times the duration of the track.
 
 
-## Examining the results from the paper experiments
+## Training Demucs
 
-The metrics for our experiments are stored in the `results` folder. In particular
-`museval` json evaluations are stored in `results/evals/EXPERIMENT NAME/results`.
-You can aggregate and display the results using
-```bash
-python3 valid_table.py -p # show valid loss, aggregated with multiple random seeds
-python3 result_table.py -p # show SDR on test set, aggregated with multiple random seeds
-python3 result_table.py -p SIR # also SAR, ISR, show other metrics
-```
-The `std` column shows the standard deviation divided by the square root of the number of runs.
+If you want to train (Hybrid) Demucs, please follow the [training doc](docs/training.md).
 
-## Training Demucs and evaluating on the MusDB dataset
+## MDX Challenge reproduction
 
-If you want to train Demucs from scratch, you will need a copy of the MusDB dataset.
-It can be obtained on the [MusDB website][musdb].
-To start training on a single GPU or CPU, use:
-```bash
-python3 -m demucs -b 4  --musdb MUSDB_PATH # Demucs
-python3 -m demucs -b 4  --musdb MUSDB_PATH --tasnet --samples=80000 --split_valid # Conv-Tasnet
-```
-The `-b 4` flag will set the batch size to 4. The default is 4 and will crash on a single GPU.
-Demucs was trained on 8 V100 with 32GB of RAM.
-The default parameters (batch size, number of channels etc)
-might not be suitable for 16GB GPUs.
-To train on all available GPUs, use:
-```bash
-python3 run.py --musdb MUSDB_PATH [EXTRA_FLAGS]
-```
-
-This will launch one process per GPU and report the output of the first one. When interrupting
-such a run, it is possible some of the children processes are not killed properly, be mindful of that.
-If you want to use only some of the available GPUs, export the `CUDA_VISIBLE_DEVICES` variable to
-select those.
-
-To see all the possible options, use `python3 -m demucs --help`.
-
-### About checkpointing
-
-Demucs will automatically generate an experiment name from the command line flags you provided.
-It will checkpoint after every epoch. If a checkpoint already exist for the combination of flags
-you provided, it will be automatically used. In order to ignore/delete a previous checkpoint,
-run with the `-R` flag.
-The optimizer state, the latest model and the best model on valid are stored. At the end of each
-epoch, the checkpoint will erase the one from the previous epoch.
-By default, checkpoints are stored in the `./checkpoints` folder. This can be changed using the
-`--checkpoints CHECKPOINT_FOLDER` flag.
-
-Not all options will impact the name of the experiment. For instance `--workers` is not
-shown in the name, therefore, changing this parameter will not impact the checkpoint file
-used. Refer to [parser.py](demucs/parser.py) for more details.
+In order to reproduce the results from the Track A and Track B submissions, checkout the [MDX Hybrid Demucs submission repo][mdx_submission].
 
 
-### Test set evaluations
-
-Test set evaluations computed with [museval][museval] will be stored under
-`evals/EXPERIMENT NAME/results`. The experiment name
-is the first thing printed when running `python3 run.py`  or `python3 -m demucs`. If you used
-the flag `--save`, there will also be a folder `evals/EXPERIMENT NAME/wavs` containing
-all the extracted waveforms.
-
-
-#### Running on a cluster
-
-If you have a cluster available with Slurm, you can set the `run_slurm.py` as the target of a
-slurm job, using as many nodes as you want and a single task per node. `run_slurm.py` will
-create one process per GPU and run in a distributed manner. Multinode training is supported.
-
-### Extracting Raw audio for faster loading
-
-We observed that loading from compressed mp4 audio lead to unreliable speed, sometimes reducing by
-a factor of 2 the number of iterations per second. It is possible to extract all data
-to raw PCM f32e format. If you wish to store the raw data under `RAW_PATH`, run the following
-command first:
-
-```bash
-python3 -m demucs.raw [--workers=10] MUSDB_PATH RAW_PATH
-```
-
-You can then train using the `--raw RAW_PATH` flag, for instance:
-```bash
-python3 run.py --raw RAW_PATH --musdb MUSDB_PATH
-```
-You still need to provide the path to the MusDB dataset as we always load the test set
-from the original MusDB.
-
-
-### Results reproduction
-To reproduce the performance of the main Demucs model in our paper:
-```bash
-# Extract raw waveforms. This is optional
-python3 -m demucs.data MUSDB_PATH RAW_PATH
-export DEMUCS_RAW=RAW_PATH
-# Train models with default parameters and multiple seeds
-python3 run.py --seed 42 # for Demucs
-python3 run.py --seed 42 --tasnet --X=10 --samples=80000 --epochs=180 --split_valid # for Conv-Tasnet
-# Repeat for --seed = 43, 44, 45 and 46
-```
-
-You can visualize the results aggregated on multiple seeds using
-```bash
-python3 valid_table.py # compare validation losses
-python3 result_table.py # compare test SDR
-python3 result_table.py SIR # compare test SIR, also available ISR, and SAR
-```
-
-You can look at our exploration file [dora.py](dora.py) to see the exact flags
-for all experiments (grid search and ablation study). If you have a Slurm cluster,
-you can also try adapting it to run on your own.
-
-
-### Environment variables
-
-If you do not want to always specify the path to MUSDB, you can export the following variables:
-```bash
-export DEMUCS_MUSDB=PATH TO MUSDB
-# Optionally, if you extracted raw pcm data
-# export DEMUCS_RAW=PATH TO RAW PCM
-```
 
 ## How to cite
 
 ```
-@article{defossez2019music,
-  title={Music Source Separation in the Waveform Domain},
-  author={D{\'e}fossez, Alexandre and Usunier, Nicolas and Bottou, L{\'e}on and Bach, Francis},
-  journal={arXiv preprint arXiv:1911.13254},
-  year={2019}
+@inproceedings{defossez2021hybrid,
+  title={Hybrid Spectrogram and Waveform Source Separation},
+  author={D{\'e}fossez, Alexandre},
+  booktitle={Proceedings of the ISMIR 2021 Workshop on Music Source Separation},
+  year={2021}
 }
 ```
 
@@ -338,21 +268,19 @@ export DEMUCS_MUSDB=PATH TO MUSDB
 
 Demucs is released under the MIT license as found in the [LICENSE](LICENSE) file.
 
-The file `demucs/tasnet.py` is adapted from the [kaituoxu/Conv-TasNet][tasnet] repository.
-It was originally released under the MIT License updated to support multiple audio channels.
-
-
-[nsynth]: https://magenta.tensorflow.org/datasets/nsynth
-[sing_nips]: https://research.fb.com/publications/sing-symbol-to-instrument-neural-generator
-[sing]: https://github.com/facebookresearch/SING
+[hybrid_paper]: https://arxiv.org/abs/2111.03600
 [waveunet]: https://github.com/f90/Wave-U-Net
 [musdb]: https://sigsep.github.io/datasets/musdb.html
-[museval]: https://github.com/sigsep/sigsep-mus-eval/
 [openunmix]: https://github.com/sigsep/open-unmix-pytorch
 [mmdenselstm]: https://arxiv.org/abs/1805.02410
-[demucs_arxiv]: https://hal.archives-ouvertes.fr/hal-02379796/document
-[musevalpth]: museval_torch.py
-[tasnet]: https://github.com/kaituoxu/Conv-TasNet
-[audio]: https://ai.honu.io/papers/demucs/index.html
+[demucs_v2]: https://github.com/facebookresearch/demucs/tree/v2
+[demucs_v3]: https://github.com/facebookresearch/demucs/tree/v3
 [spleeter]: https://github.com/deezer/spleeter
-[soundcloud]: https://soundcloud.com/voyageri/sets/source-separation-in-the-waveform-domain
+[soundcloud]: https://soundcloud.com/honualx/sets/source-separation-in-the-waveform-domain
+[d3net]: https://arxiv.org/abs/2010.01733
+[mdx]: https://www.aicrowd.com/challenges/music-demixing-challenge-ismir-2021
+[kuielab]: https://github.com/kuielab/mdx-net-submission
+[decouple]: https://arxiv.org/abs/2109.05418
+[mdx_submission]: https://github.com/adefossez/mdx21_demucs
+[bandsplit]: https://arxiv.org/abs/2209.15174
+[htdemucs]: https://arxiv.org/abs/2211.08553

@@ -1,34 +1,51 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
+# Copyright (c) Meta, Inc. and its affiliates.
 # All rights reserved.
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-import errno
-import functools
-import gzip
-import os
-import random
-import socket
-import tempfile
-import warnings
+from collections import defaultdict
 from contextlib import contextmanager
+import math
+import os
+import tempfile
+import typing as tp
 
-import torch as th
-import tqdm
-from torch import distributed
+import torch
 from torch.nn import functional as F
+from torch.utils.data import Subset
 
 
-def center_trim(tensor, reference):
+def unfold(a, kernel_size, stride):
+    """Given input of size [*OT, T], output Tensor of size [*OT, F, K]
+    with K the kernel size, by extracting frames with the given stride.
+
+    This will pad the input so that `F = ceil(T / K)`.
+
+    see https://github.com/pytorch/pytorch/issues/60466
+    """
+    *shape, length = a.shape
+    n_frames = math.ceil(length / stride)
+    tgt_length = (n_frames - 1) * stride + kernel_size
+    a = F.pad(a, (0, tgt_length - length))
+    strides = list(a.stride())
+    assert strides[-1] == 1, 'data should be contiguous'
+    strides = strides[:-1] + [stride, 1]
+    return a.as_strided([*shape, n_frames, kernel_size], strides)
+
+
+def center_trim(tensor: torch.Tensor, reference: tp.Union[torch.Tensor, int]):
     """
     Center trim `tensor` with respect to `reference`, along the last dimension.
     `reference` can also be a number, representing the length to trim to.
     If the size difference != 0 mod 2, the extra sample is removed on the right side.
     """
-    if hasattr(reference, "size"):
-        reference = reference.size(-1)
-    delta = tensor.size(-1) - reference
+    ref_size: int
+    if isinstance(reference, torch.Tensor):
+        ref_size = reference.size(-1)
+    else:
+        ref_size = reference
+    delta = tensor.size(-1) - ref_size
     if delta < 0:
         raise ValueError("tensor must be larger than reference. " f"Delta is {delta}.")
     if delta:
@@ -36,35 +53,38 @@ def center_trim(tensor, reference):
     return tensor
 
 
-def average_metric(metric, count=1.):
-    """
-    Average `metric` which should be a float across all hosts. `count` should be
-    the weight for this particular host (i.e. number of examples).
-    """
-    metric = th.tensor([count, count * metric], dtype=th.float32, device='cuda')
-    distributed.all_reduce(metric, op=distributed.ReduceOp.SUM)
-    return metric[1].item() / metric[0].item()
+def pull_metric(history: tp.List[dict], name: str):
+    out = []
+    for metrics in history:
+        metric = metrics
+        for part in name.split("."):
+            metric = metric[part]
+        out.append(metric)
+    return out
 
 
-def free_port(host='', low=20000, high=40000):
+def EMA(beta: float = 1):
     """
-    Return a port number that is most likely free.
-    This could suffer from a race condition although
-    it should be quite rare.
+    Exponential Moving Average callback.
+    Returns a single function that can be called to repeatidly update the EMA
+    with a dict of metrics. The callback will return
+    the new averaged dict of metrics.
+
+    Note that for `beta=1`, this is just plain averaging.
     """
-    sock = socket.socket()
-    while True:
-        port = random.randint(low, high)
-        try:
-            sock.bind((host, port))
-        except OSError as error:
-            if error.errno == errno.EADDRINUSE:
-                continue
-            raise
-        return port
+    fix: tp.Dict[str, float] = defaultdict(float)
+    total: tp.Dict[str, float] = defaultdict(float)
+
+    def _update(metrics: dict, weight: float = 1) -> dict:
+        nonlocal total, fix
+        for key, value in metrics.items():
+            total[key] = total[key] * beta + weight * float(value)
+            fix[key] = fix[key] * beta + weight
+        return {key: tot / fix[key] for key, tot in total.items()}
+    return _update
 
 
-def sizeof_fmt(num, suffix='B'):
+def sizeof_fmt(num: float, suffix: str = 'B'):
     """
     Given `num` bytes, return human readable size.
     Taken from https://stackoverflow.com/a/1094933
@@ -76,74 +96,8 @@ def sizeof_fmt(num, suffix='B'):
     return "%.1f%s%s" % (num, 'Yi', suffix)
 
 
-def human_seconds(seconds, display='.2f'):
-    """
-    Given `seconds` seconds, return human readable duration.
-    """
-    value = seconds * 1e6
-    ratios = [1e3, 1e3, 60, 60, 24]
-    names = ['us', 'ms', 's', 'min', 'hrs', 'days']
-    last = names.pop(0)
-    for name, ratio in zip(names, ratios):
-        if value / ratio < 0.3:
-            break
-        value /= ratio
-        last = name
-    return f"{format(value, display)} {last}"
-
-
-def apply_model(model, mix, shifts=None, split=False, progress=False):
-    """
-    Apply model to a given mixture.
-
-    Args:
-        shifts (int): if > 0, will shift in time `mix` by a random amount between 0 and 0.5 sec
-            and apply the oppositve shift to the output. This is repeated `shifts` time and
-            all predictions are averaged. This effectively makes the model time equivariant
-            and improves SDR by up to 0.2 points.
-        split (bool): if True, the input will be broken down in 8 seconds extracts
-            and predictions will be performed individually on each and concatenated.
-            Useful for model with large memory footprint like Tasnet.
-        progress (bool): if True, show a progress bar (requires split=True)
-    """
-    channels, length = mix.size()
-    device = mix.device
-    if split:
-        out = th.zeros(4, channels, length, device=device)
-        shift = model.samplerate * 10
-        offsets = range(0, length, shift)
-        scale = 10
-        if progress:
-            offsets = tqdm.tqdm(offsets, unit_scale=scale, ncols=120, unit='seconds')
-        for offset in offsets:
-            chunk = mix[..., offset:offset + shift]
-            chunk_out = apply_model(model, chunk, shifts=shifts)
-            out[..., offset:offset + shift] = chunk_out
-            offset += shift
-        return out
-    elif shifts:
-        max_shift = int(model.samplerate / 2)
-        mix = F.pad(mix, (max_shift, max_shift))
-        offsets = list(range(max_shift))
-        random.shuffle(offsets)
-        out = 0
-        for offset in offsets[:shifts]:
-            shifted = mix[..., offset:offset + length + max_shift]
-            shifted_out = apply_model(model, shifted)
-            out += shifted_out[..., max_shift - offset:max_shift - offset + length]
-        out /= shifts
-        return out
-    else:
-        valid_length = model.valid_length(length)
-        delta = valid_length - length
-        padded = F.pad(mix, (delta // 2, delta - delta // 2))
-        with th.no_grad():
-            out = model(padded.unsqueeze(0))[0]
-        return center_trim(out, mix)
-
-
 @contextmanager
-def temp_filenames(count, delete=True, **kwargs):
+def temp_filenames(count: int, delete=True):
     names = []
     try:
         for _ in range(count):
@@ -155,32 +109,33 @@ def temp_filenames(count, delete=True, **kwargs):
                 os.unlink(name)
 
 
-def load_model(path):
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        load_from = path
-        if str(path).endswith(".gz"):
-            load_from = gzip.open(path, "rb")
-        klass, args, kwargs, state = th.load(load_from, 'cpu')
-    model = klass(*args, **kwargs)
-    model.load_state_dict(state)
-    return model
+def random_subset(dataset, max_samples: int, seed: int = 42):
+    if max_samples >= len(dataset):
+        return dataset
+
+    generator = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(len(dataset), generator=generator)
+    return Subset(dataset, perm[:max_samples].tolist())
 
 
-def save_model(model, path):
-    args, kwargs = model._init_args_kwargs
-    klass = model.__class__
-    state = {k: p.data.to('cpu') for k, p in model.state_dict().items()}
-    save_to = path
-    if str(path).endswith(".gz"):
-        save_to = gzip.open(path, "wb", compresslevel=5)
-    th.save((klass, args, kwargs, state), save_to)
+class DummyPoolExecutor:
+    class DummyResult:
+        def __init__(self, func, *args, **kwargs):
+            self.func = func
+            self.args = args
+            self.kwargs = kwargs
 
+        def result(self):
+            return self.func(*self.args, **self.kwargs)
 
-def capture_init(init):
-    @functools.wraps(init)
-    def __init__(self, *args, **kwargs):
-        self._init_args_kwargs = (args, kwargs)
-        init(self, *args, **kwargs)
+    def __init__(self, workers=0):
+        pass
 
-    return __init__
+    def submit(self, func, *args, **kwargs):
+        return DummyPoolExecutor.DummyResult(func, *args, **kwargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        return
